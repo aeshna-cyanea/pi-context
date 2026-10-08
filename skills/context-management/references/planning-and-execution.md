@@ -33,7 +33,7 @@ Both variants use the same context-management rhythm.
 5. Once a subtask produces a stable takeaway, apply the main skill's compact gate. Check whether the next subtask still needs the same plan details, code, tests, or evidence; a checked-off item does not make them stale.
 6. Continue with that shared working set, or compact if the chosen anchor removes enough low-value history to outweigh reconstruction.
 7. If the plan changes materially, checkpoint the updated plan state again.
-8. If the last subtask completes the user's whole request, give the final answer without an automatic compact and retain the raw trail for review or feedback. Decide on cleanup only when a later message establishes a new task or explicit next phase.
+8. If the last subtask completes autumn's whole request, give the final answer without an automatic compact and retain the raw trail for review or feedback. Decide on cleanup only when a later message establishes a new task or explicit next phase.
 
 ## Useful anchors
 

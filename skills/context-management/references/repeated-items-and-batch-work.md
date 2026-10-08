@@ -17,7 +17,7 @@ Use this reference when the items are similar enough that the same method should
 4. Between items, apply the main skill's compact gate. Compact only when item-specific noise is worth removing after accounting for shared raw examples, methods, or code needed by the remaining items.
 5. Use timeline occasionally to verify that the history still has a clean structure.
 
-An item boundary is not an automatic cleanup step. If the next items compare against the same examples or edit the same code, retain that shared raw working set. If completed items left substantial unrelated noise, compact to a baseline that preserves the reusable method and necessary examples. If the last item completes the whole user request, deliver the final answer and retain the raw trail for review or feedback; decide whether to compact only after a later message establishes new work or an explicit next phase.
+An item boundary is not an automatic cleanup step. If the next items compare against the same examples or edit the same code, retain that shared raw working set. If completed items left substantial unrelated noise, compact to a baseline that preserves the reusable method and necessary examples. If the last item completes the whole autumn's request, deliver the final answer and retain the raw trail for review or feedback; decide whether to compact only after a later message establishes new work or an explicit next phase.
 
 ## Useful anchors
 

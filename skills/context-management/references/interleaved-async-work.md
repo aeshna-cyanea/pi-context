@@ -5,7 +5,7 @@ Use this reference when the hard part is **not** the external worker itself, but
 Common examples:
 
 - a main task continues while background jobs, subagents, reviewers, or tools may return later
-- the user asks side questions while another front is still active
+- autumn asks side questions while another front is still active
 - progress updates, returned results, decisions, and new work are interleaved in the same thread
 - several pending fronts have different next actions, and raw history starts making the current state hard to see
 
@@ -21,7 +21,7 @@ A front may be:
 - a paused mainline task
 - a background command or long-running job
 - a subagent/reviewer/collaborator result that may return later
-- a pending user decision
+- a pending autumn's decision
 - a side request that should be answered before resuming the mainline
 
 For each front, keep only one of these in the active working set:
@@ -37,7 +37,7 @@ The mistake to avoid is carrying every front raw at once.
 1. Identify the active front before each substantial reply or tool call.
 2. If another front is still pending, represent it as a small state capsule unless its raw details will be needed again soon.
 3. When a result returns, capture it into the relevant front before responding.
-4. If the returned result does not become the active front immediately, park it as state and preserve the user's current focus.
+4. If the returned result does not become the active front immediately, park it as state and preserve autumn's current focus.
 5. Before switching fronts, apply the main skill's compact gate, including the cost of restoring any front that will resume soon.
 6. If several fronts are tangled, run `context_timeline` to find the clean anchor and separate active, parked, completed, and stale paths.
 
@@ -66,7 +66,7 @@ Compact when interleaving has made raw context a worse working set:
 - you are switching from one front to another after a noisy phase
 - a side request arrives while the mainline is noisy but resumable from a capsule
 - a background/subagent/reviewer/tool result returned and its raw logs are no longer needed
-- the user has asked for status more than once and you cannot state all active fronts briefly
+- autumn has asked for status more than once and you cannot state all active fronts briefly
 - a front was rejected, superseded, completed, or parked indefinitely
 - the next action belongs to a different front than the recent raw history
 - the active front started much earlier, and the middle of the thread is mostly completed or unrelated fronts
@@ -136,7 +136,7 @@ Avoid:
 - treating async/subagent management as the goal instead of keeping the current agent's working set clear
 - carrying several fronts raw at once
 - copying externally recoverable status dumps instead of preserving reliable source pointers
-- letting a returned result overwrite the user's current active request without deciding focus
+- letting a returned result overwrite autumn's current active request without deciding focus
 - reporting status repeatedly while the real problem is that fronts are not summarized
 - compacting away a front without preserving how to resume it
 - avoiding a deep compact when source pointers and capsules can restore the active state cheaply enough to make cleanup worthwhile

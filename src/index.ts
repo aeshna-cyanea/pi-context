@@ -706,7 +706,7 @@ export default function (pi: ExtensionAPI) {
                     customType: PiContextCustomMessageType,
                     content: compactParams.codemodeToolCallId
                         ? "context_compact complete. Your previous history was summarized. Read the retained codemode output and the handoff summary. The script already completed; do not repeat its operations or a Next Step it has already satisfied. Continue with the remaining work."
-                        : "context_compact complete. A handoff summary of your previous conversation path was injected above. Read it to understand your new state. Execute the Next Step from the summary",
+                        : "context_compact complete. Above is the handoff summary of your previous path. Read it, take it as your current state, and continue with the next step it names. Files, processes, and external services are unchanged.",
                     display: false,
                 }, {
                     triggerTurn: true,

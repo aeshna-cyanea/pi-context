@@ -18,7 +18,7 @@ This reference is for **input-heavy work where the process is much larger than t
 2. Search, browse, read, inspect, and follow leads normally.
 3. If you lose orientation, review the timeline.
 4. Once the investigation yields a stable finding and there is another step to take, evaluate the main skill's compact gate: what raw evidence is still needed, what stale trail would be removed, and would cleanup help after recovery costs?
-5. Continue with the conclusion, recommendation, or next action instead of carrying the entire raw exploration forward. If the finding is the final answer to the user's current request, answer first and wait; evaluate the compact gate on the next user message if it starts new work.
+5. Continue with the conclusion, recommendation, or next action instead of carrying the entire raw exploration forward. If the finding is the final answer to autumn's current request, answer first and wait; evaluate the compact gate on the next user message if it starts new work.
 
 Checkpoint-only is appropriate when the loaded evidence is still the best working set. Compact when the search trail has become low-value and its findings can support the continuation without costly reconstruction.
 

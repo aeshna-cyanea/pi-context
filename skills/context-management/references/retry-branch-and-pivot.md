@@ -47,7 +47,7 @@ Use this pattern when the old direction no longer makes sense even though the ta
 
 Examples:
 - the original approach is no longer viable
-- the user's priority changed
+- autumn's priority changed
 - the scope narrowed or widened enough that old execution noise is now baggage
 
 In these cases:
