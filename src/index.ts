@@ -63,6 +63,18 @@ const findCodemodeCompactResult = (
  * A successful codemode result can be retained in full; other contextual
  * entries still cancel because the handoff summary does not account for them.
  */
+/**
+ * A display-only notice from an extension - a clock chime, a pressure reminder - is not a
+ * conversational move, and treating it as one destroys an authored compaction outright. But a
+ * `custom_message` is also how another extension injects genuinely new context, which the handoff
+ * summary does need to account for, and the fork cannot tell the two apart from the entry alone.
+ * So the writer opts in: `pi.sendMessage({ ..., details: { passive: true } })`. Anything unflagged
+ * still cancels, which keeps upstream's protection intact.
+ */
+const isPassiveNotice = (entry: SessionEntry): boolean =>
+    entry.type === "custom_message" &&
+    (entry.details as { passive?: unknown } | undefined)?.passive === true;
+
 export const didConversationAdvance = (
     branch: readonly SessionEntry[],
     requestLeaf: string | null,
@@ -85,6 +97,7 @@ export const didConversationAdvance = (
     }
     return tail.some((entry) => {
         if (PassiveCompactionEntryTypes.has(entry.type)) return false;
+        if (isPassiveNotice(entry)) return false;
         if (compactToolCallId && entry.type === "message") {
             const message = entry.message;
             if (message.role === "toolResult" && !message.isError) {

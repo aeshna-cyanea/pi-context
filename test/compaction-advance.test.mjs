@@ -21,7 +21,7 @@ test("allows non-contextual session entries", () => {
     assert.equal(didConversationAdvance(branch, anchor.id), false);
 });
 
-test("cancels when any message or contextual custom message arrives", () => {
+test("cancels for messages and unflagged custom_message; a flagged passive notice does not", () => {
     for (const role of ["user", "assistant", "toolResult", "bashExecution"]) {
         assert.equal(
             didConversationAdvance(
@@ -32,12 +32,21 @@ test("cancels when any message or contextual custom message arrives", () => {
             role,
         );
     }
+    // A chime or a status line is not a conversational move, but only the writer knows that: an
+    // unflagged custom_message is still how another extension injects new context, so it cancels.
+    for (const notice of [
+        { id: "chime", type: "custom_message", customType: "clock", display: true, details: { passive: true } },
+        { id: "reminder", type: "custom_message", customType: "headroom", display: false, details: { passive: true } },
+    ]) {
+        assert.equal(didConversationAdvance(branchWith(notice), anchor.id), false, notice.id);
+    }
     assert.equal(
         didConversationAdvance(
-            branchWith({ id: "custom-message", type: "custom_message" }),
+            branchWith({ id: "custom-message", type: "custom_message", content: "New context" }),
             anchor.id,
         ),
         true,
+        "an unflagged custom_message still cancels",
     );
 });
 
