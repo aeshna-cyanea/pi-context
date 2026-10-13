@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import {
     type ExtensionAPI,
     type SessionManager,
@@ -179,6 +180,67 @@ const summaryTokens = (summary: string) => Math.ceil(summary.length / 4);
 
 interface FoldSize { nodes: number; tokens: number; }
 
+// autumn, 2026-10-13: "you can even give yourself different prompts based on how many
+// nodes you're collapsing - 1 big tool output that only needed a few morsels of info
+// from (or turned out to be complete junk), vs a long chain of work that needs a lossy
+// but correct summary." The summary is an argument I author BEFORE the call, so the
+// shape has to be visible where I choose the target -- in the timeline -- and again in
+// the result, where it teaches the next one.
+type FoldShape = "single-result" | "short" | "chain" | "mixed";
+
+const GUARD_SHORT_TOKENS = Number(process.env.PI_CONTEXT_COMPACT_SHORT_TOKENS ?? 2_000);
+const GUARD_CHAIN_NODES = Number(process.env.PI_CONTEXT_COMPACT_CHAIN_NODES ?? 8);
+
+const shapeFold = (region: readonly SessionEntry[]): { shape: FoldShape; tokens: number; share: number } => {
+    const sizes = region.map((entry) => estimateHistoryTokens(entry));
+    const tokens = sizes.reduce((sum, n) => sum + n, 0);
+    const share = tokens > 0 ? Math.max(0, ...sizes) / tokens : 0;
+    if (tokens < GUARD_SHORT_TOKENS) return { shape: "short", tokens, share };
+    if (region.length <= 3 && share >= 0.75) return { shape: "single-result", tokens, share };
+    if (region.length >= GUARD_CHAIN_NODES) return { shape: "chain", tokens, share };
+    return { shape: "mixed", tokens, share };
+};
+
+const FOLD_RECIPES: Record<FoldShape, string> = {
+    "single-result": "one large result dominates this fold: keep only the morsels you actually used, cite the file or command instead of restating its content, and if it turned out to be junk, say so in one line and move on",
+    short: "this fold is small: one or two lines saying what changed since the target is enough, because a longer summary costs more window than the fold frees",
+    chain: "a chain of work is being folded: write a lossy-but-correct handoff -- state, decisions and constraints, external side effects, validation status, source anchors, explicit next step",
+    mixed: "size the summary to the fold: cover what is being discarded, never what already sits above the target",
+};
+
+const FOLD_LABEL: Record<FoldShape, string> = {
+    "single-result": "1 huge result", short: "short", chain: "chain", mixed: "mixed",
+};
+
+// The folded path is not deleted -- it stays in the session JSONL and stays searchable.
+// Say so, because "the summary lost something" and "I must re-derive it" are not the only
+// two options. Templated, and overridable so this stays upstreamable: bagheera's copy
+// names the local index command.
+const DEFAULT_POST_COMPACT_HINT =
+    "The folded history is not gone: it is still in this session file and searchable. Search it before re-deriving anything.";
+
+/**
+ * Long prose does not fit the single-token KEY=value convention that bagheera's env loader
+ * uses, so the hint may live in a file. Read it per compaction rather than at load: editing
+ * the hint must not require a restart. A named-but-unreadable file falls back to the inline
+ * or default text and says so out loud, because a hint that silently goes missing is the
+ * same failure the hint exists to prevent. Placeholders {session} and {file} are substituted.
+ */
+export const postCompactHint = (): string => {
+    const file = process.env.PI_CONTEXT_POST_COMPACT_HINT_FILE;
+    if (file) {
+        try {
+            const text = readFileSync(file, "utf8").trim();
+            if (text) return text;
+            console.warn(`pi-context: ${file} is empty, using the default post-compaction hint`);
+        } catch (err) {
+            console.warn(`pi-context: cannot read PI_CONTEXT_POST_COMPACT_HINT_FILE ${file}: ` +
+                `${err instanceof Error ? err.message : String(err)}; using the default hint`);
+        }
+    }
+    return process.env.PI_CONTEXT_POST_COMPACT_HINT || DEFAULT_POST_COMPACT_HINT;
+};
+
 /** What a compaction at `tid` would actually replace: the active path after that node. */
 const measureFold = (sm: SessionManager, tid: string): FoldSize | undefined => {
     const branch = sm.getBranch();
@@ -222,7 +284,7 @@ const ContextTimelineParams = Type.Object({
 const ContextCompactDescription = "Create a summarized continuation branch from an earlier checkpoint or history node. The selected target is the branch point; the summary must restore the useful state from the compacted path after that target. Only the path between target and tip is replaced, so a target near the head reclaims almost nothing: the tool reports the fold size, and refuses a shallow target while context is tight. This changes conversation history only; it does not modify or roll back disk files or external systems.";
 const ContextCompactParams = Type.Object({
     target: Type.String({ description: "Checkpoint name, history node ID, or root to use as the branch point for the summarized continuation. 'previous-summary' selects the newest summary already on the active path, which is usually the target that actually frees window." }),
-    summary: Type.String({ description: "Handoff summary injected into the new continuation branch. It replaces ONLY the folded region, so cover what is being discarded -- task/state at the moment of the call, decisions and constraints, external side effects (changed files, processes, browser/tickets/remote state), validation status, source anchors, and an explicit next step. Do not restate anything that already sits above the target: the retained prefix is still in context, and duplicated text is pure cost. Do not rely on backupCheckpoint for details needed in the next phase." }),
+    summary: Type.String({ description: "Handoff summary injected into the new continuation branch. it replaces ONLY the folded region, so its size follows the fold, which context_timeline labels per candidate. A fold dominated by one huge tool result needs the morsels you actually used -- cite the file or command rather than restating content, or one line if it was junk. A short fold needs one or two lines. A long chain of work needs a lossy-but-correct handoff: task/state at the moment of the call, decisions and constraints, external side effects (changed files, processes, browser/tickets/remote state), validation status, source anchors, explicit next step. Either way, do not restate anything that already sits above the target: the retained prefix is still in context, and duplicated text is pure cost. Do not rely on backupCheckpoint for details needed in the next phase." }),
     backupCheckpoint: Type.Optional(Type.String({ description: "Optional checkpoint name to label the current conversation state before branching. This is only a recovery pointer; the summary must still contain the state needed to continue." })),
     force: Type.Optional(Type.Boolean({ description: "Proceed even when the target folds too little to help. Use only for a compaction whose purpose is a fresh summary rather than reclaimed window." })),
 });
@@ -590,8 +652,9 @@ export default function (pi: ExtensionAPI) {
 
                 // Target candidates carry their price: compacting here frees this much.
                 const isCandidate = entry.type === "branch_summary" || entry.type === "compaction" || !!label;
-                const price = isCandidate
-                    ? ` · reclaim ~${formatTokens(reclaim[branchIndexOf.get(id) ?? 0] ?? 0)}`
+                const candidateIndex = branchIndexOf.get(id);
+                const price = isCandidate && candidateIndex != null
+                    ? ` · reclaim ~${formatTokens(reclaim[candidateIndex] ?? 0)} (${FOLD_LABEL[shapeFold(branch.slice(candidateIndex + 1)).shape]})`
                     : "";
 
                 lines.push(`${marker} ${id}${meta ? ` (${meta})` : ""} [${role}]${price} ${body}`);
@@ -646,6 +709,8 @@ export default function (pi: ExtensionAPI) {
             }
 
             const fold = measureFold(sm, tid);
+            const shape = fold ? shapeFold(sm.getBranch().slice(
+                sm.getBranch().findIndex((entry) => entry.id === tid) + 1)) : undefined;
             const usage = ctx.getContextUsage();
             const fill = usage?.percent;
             const added = summaryTokens(params.summary);
@@ -660,7 +725,7 @@ export default function (pi: ExtensionAPI) {
                         `context_compact: refusing this target at ${formatContextUsage(usage, true)} fill -- ${detail}. ` +
                         `A compaction replaces only the path between target and tip, so a target near the head costs more than it frees. ` +
                         (alt && altFold ? `Better target: ${alt.id} (${alt.kind}), which folds ${altFold.nodes} node(s) / ~${formatTokens(altFold.tokens)} tokens. ` : "") +
-                        `Or shrink the summary to the folded region: it never needs to restate what already sits above the target. ` +
+                        `Recipe for this fold (${shape ? FOLD_RECIPES[shape.shape] : "unknown shape"}). ` +
                         `Pass force: true only if you want a fresh summary rather than reclaimed window.`,
                     );
                 }
@@ -690,6 +755,7 @@ export default function (pi: ExtensionAPI) {
                 notes.push(`summary ~${formatTokens(added)} tokens`);
                 notes.push(`net ~${net! >= 0 ? "+" : "-"}${formatTokens(Math.abs(net!))} of window`);
             }
+            if (shape) notes.push(`fold shape: ${FOLD_LABEL[shape.shape]} -- ${FOLD_RECIPES[shape.shape]}`);
             if (marginal) {
                 const alt = betterTarget(sm);
                 const altFold = alt ? measureFold(sm, alt.id) : undefined;
@@ -842,11 +908,14 @@ export default function (pi: ExtensionAPI) {
                     `Summary: ${compactParams.enrichedMessage}`,
                 ].join("\n"), "info");
 
+                const hint = postCompactHint()
+                    .replaceAll("{session}", sm.getSessionId?.() ?? "")
+                    .replaceAll("{file}", sm.getSessionFile?.() ?? "");
                 pi.sendMessage({
                     customType: PiContextCustomMessageType,
                     content: compactParams.codemodeToolCallId
-                        ? `${reclaimNote} Your previous history was summarized. Read the retained codemode output and the handoff summary. The script already completed; do not repeat its operations or a Next Step it has already satisfied. Continue with the remaining work.`
-                        : `${reclaimNote} Above is the handoff summary of your previous path. Read it, take it as your current state, and continue with the next step it names. Files, processes, and external services are unchanged.`,
+                        ? `${reclaimNote} Your previous history was summarized. Read the retained codemode output and the handoff summary. The script already completed; do not repeat its operations or a Next Step it has already satisfied. Continue with the remaining work. ${hint}`
+                        : `${reclaimNote} Above is the handoff summary of your previous path. Read it, take it as your current state, and continue with the next step it names. Files, processes, and external services are unchanged. ${hint}`,
                     display: false,
                 }, {
                     triggerTurn: true,

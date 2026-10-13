@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
-import registerContext from "../dist/index.js";
+import registerContext, { postCompactHint } from "../dist/index.js";
 
 // The compaction-target guard (todos 58 + 77). These tests exist because the guard's
 // whole job is arithmetic about window, and arithmetic is what a fixture can pin.
@@ -73,7 +76,7 @@ test("refuses a target that costs more window than it frees, and names the bette
             assert.match(err.message, /refusing this target at 96\.0% \(251k\/262k\) fill/);
             assert.match(err.message, /nets ~-\d/);
             assert.match(err.message, /Better target: summary12 \(previous summary on this path\)/);
-            assert.match(err.message, /shrink the summary to the folded region/);
+            assert.match(err.message, /Recipe for this fold \(this fold is small: one or two lines/);
             return true;
         },
     );
@@ -122,6 +125,67 @@ test("'previous-summary' resolves to the newest summary already on the path", as
     // summary12 folds the two nodes after it; the request node plus the small step.
     assert.match(result.content[0].text, /^compact start/);
     assert.match(result.content[0].text, /folds 2 node\(s\)/);  // everything after summary12
+});
+
+test("a fold dominated by one huge result is labelled, and the recipe fits it", async () => {
+    const entries = [
+        { id: "rootnode", type: "message", message: user("Root prefix that stays in context.") },
+        { id: "callread1", type: "message", message: assistant([toolCall("r1", "bash")]) },
+        { id: "hugeout1", type: "message", message: {
+            role: "toolResult", toolName: "bash", toolCallId: "r1", content: text(bigText(60_000)),
+            isError: false, timestamp: 1,
+        } },
+        { id: "request1", type: "message", message: assistant([toolCall("compact-call", "context_compact")]) },
+    ];
+    const h = createHarness({ entries, labels: { callread1: "before-the-dump" } });
+    const tl = await h.timeline({});
+    assert.match(tl.content[0].text, /before-the-dump.*reclaim ~15k \(1 huge result\)/);
+    const result = await h.compact({ target: "before-the-dump", summary: "The dump proved X; payload is in /tmp/out.txt." });
+    assert.match(result.content[0].text, /fold shape: 1 huge result -- one large result dominates this fold/);
+    assert.match(result.content[0].text, /cite the file or command instead of restating its content/);
+});
+
+test("a long chain of work is labelled as a chain and asked for a lossy-but-correct handoff", async () => {
+    const entries = [{ id: "rootnode", type: "message", message: user("Root prefix that stays.") }];
+    for (let i = 0; i < 12; i++) {
+        entries.push({ id: `step${i}`, type: "message",
+            message: assistant(text(`Step ${i} of the work, each carrying a little real content. `.repeat(12))) });
+    }
+    entries.push({ id: "request1", type: "message", message: assistant([toolCall("compact-call", "context_compact")]) });
+    const h = createHarness({ entries, labels: { rootnode: "chain-start" } });
+    const tl = await h.timeline({});
+    assert.match(tl.content[0].text, /chain-start.*reclaim ~\d+k \(chain\)/);
+    const result = await h.compact({ target: "chain-start", summary: "State, decisions, side effects, next step." });
+    assert.match(result.content[0].text, /fold shape: chain -- a chain of work is being folded/);
+});
+
+test("a small fold is labelled short, so I do not write a three-paragraph handoff for it", async () => {
+    const h = createHarness({ entries: shallowPath(), usageBefore: usage(18, 47_000), labels: { smallstep: "just-now" } });
+    const tl = await h.timeline({});
+    assert.match(tl.content[0].text, /just-now.*reclaim ~\d+ \(short\)/);
+});
+
+test("the post-compaction hint is configurable, and a missing file is loud rather than silent", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pc-hint-"));
+    const file = join(dir, "hint.txt");
+    const saved = { ...process.env };
+    const warnings = [];
+    const realWarn = console.warn;
+    try {
+        delete process.env.PI_CONTEXT_POST_COMPACT_HINT_FILE;
+        delete process.env.PI_CONTEXT_POST_COMPACT_HINT;
+        assert.match(postCompactHint(), /still in this session file and searchable/);
+        process.env.PI_CONTEXT_POST_COMPACT_HINT = "inline hint";
+        assert.equal(postCompactHint(), "inline hint");
+        writeFileSync(file, "file hint with a trailing newline\n");
+        process.env.PI_CONTEXT_POST_COMPACT_HINT_FILE = file;
+        assert.equal(postCompactHint(), "file hint with a trailing newline");   // trimmed, and read per call, so no restart to change it
+        console.warn = (...a) => warnings.push(a.join(" "));
+        process.env.PI_CONTEXT_POST_COMPACT_HINT_FILE = join(dir, "absent.txt");
+        assert.equal(postCompactHint(), "inline hint");
+        console.warn = realWarn;
+        assert.match(warnings.join("\n"), /cannot read PI_CONTEXT_POST_COMPACT_HINT_FILE/);
+    } finally { console.warn = realWarn; process.env = saved; }
 });
 
 test("context_checkpoint reports fill and warns when the anchor sits deep", async () => {

@@ -201,6 +201,9 @@ for (const order of ["compact;t1;t2", "t1;compact;t2"]) {
 
         assert.match(delivery.message.content, /context_compact complete/);
         assert.match(delivery.message.content, /do not repeat/i);
+        // The folded path survives in the session JSONL, and the tool has to say so: a
+        // lossy summary does not have to mean re-deriving the work from scratch.
+        assert.match(delivery.message.content, /still in this session file and searchable/);
         assert.deepEqual(delivery.options, { triggerTurn: true, deliverAs: "followUp" });
         const [output] = retainedOutput(h);
         assert.equal(retainedOutput(h).length, 1);
