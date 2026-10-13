@@ -3,6 +3,7 @@ import {
     type SessionManager,
     type SessionEntry,
     type ExtensionCommandContext,
+    type ContextUsage,
 } from "@earendil-works/pi-coding-agent";
 import {
     Type,
@@ -153,17 +154,77 @@ const resolveTargetId = (sm: SessionManager, target: string): string => {
     return target;
 };
 
-const ContextTimelineDescription = "Inspect the active conversation path as a structural map: checkpoints, summaries/compactions, branch points, user turns, and current position. Use when orientation or compact target selection depends on the shape of history. Folded intervals show historical token estimates, not reclaimable space.";
+// ---- compaction-target guard (todos 58 + 77) ---------------------------------
+// A compaction replaces only the path between its target and the tip, so a target
+// near the head folds almost nothing while the summary text is pure addition.
+// Measured twice on myself: +4,625 tokens (2026-10-11, 199k/262k) and a session lost
+// at 252,736/262,144 (2026-10-13), where the request right after the compaction
+// reported 251,358 cache-hit tokens -- proof the branch still carried everything.
+// Both times the target was a checkpoint, which by construction sits at my current
+// position. The guard puts the price in the tool result at the moment of the call,
+// and refuses to let me buy nothing while I am actually under window pressure.
+
+// The only honest question is net window: what the folded region costs, minus what the
+// summary I am writing adds. Node count is decoration -- one enormous tool result is a
+// one-node fold worth taking, and thirty small nodes can be a fold worth refusing.
+// Measured on myself: a 12,484-char summary replaced 7 nodes and cost +4,625 tokens.
+const GUARD_MIN_NET_TOKENS = Number(process.env.PI_CONTEXT_COMPACT_MIN_NET_TOKENS ?? 2_000);
+// Below this fill a marginal compaction is wasteful but survivable; at or above it the
+// wasteful target is the failure that ends the session, so it stops being a choice I
+// get to make by accident.
+const GUARD_PRESSURE_PERCENT = Number(process.env.PI_CONTEXT_COMPACT_PRESSURE_PERCENT ?? 50);
+
+/** The summary lands on the new branch and stays there; price it like the region it replaces. */
+const summaryTokens = (summary: string) => Math.ceil(summary.length / 4);
+
+interface FoldSize { nodes: number; tokens: number; }
+
+/** What a compaction at `tid` would actually replace: the active path after that node. */
+const measureFold = (sm: SessionManager, tid: string): FoldSize | undefined => {
+    const branch = sm.getBranch();
+    const index = branch.findIndex((entry) => entry.id === tid);
+    if (index < 0) return undefined;
+    const region = branch.slice(index + 1);
+    return { nodes: region.length, tokens: region.reduce((sum, entry) => sum + estimateHistoryTokens(entry), 0) };
+};
+
+/** The newest summary on the active path, else root: the target a shallow attempt should have used. */
+const betterTarget = (sm: SessionManager): { id: string; kind: string } | undefined => {
+    const branch = sm.getBranch();
+    for (let i = branch.length - 2; i >= 0; i--) {
+        const entry = branch[i];
+        if (entry.type === "branch_summary" || entry.type === "compaction") {
+            return { id: entry.id, kind: "previous summary on this path" };
+        }
+    }
+    return branch.length ? { id: branch[0].id, kind: "root" } : undefined;
+};
+
+const PreviousTargetAliases = new Set(["previous-summary", "previous_summary", "auto"]);
+
+/** Suffix estimates over the active path: reclaim[i] = what compacting *at* branch[i] would free. */
+const reclaimByIndex = (branch: readonly SessionEntry[]): number[] => {
+    const reclaim = new Array<number>(branch.length).fill(0);
+    let running = 0;
+    for (let i = branch.length - 1; i >= 0; i--) {
+        reclaim[i] = running;
+        running += estimateHistoryTokens(branch[i]);
+    }
+    return reclaim;
+};
+
+const ContextTimelineDescription = "Inspect the active conversation path as a structural map: checkpoints, summaries/compactions, branch points, user turns, and current position. Use when orientation or compact target selection depends on the shape of history. Folded intervals show historical token estimates; each SUMMARY and checkpoint line also carries the reclaimable size of compacting at that point, which is the number that decides target choice.";
 const ContextTimelineParams = Type.Object({
     limit: Type.Optional(Type.Number({ description: "Maximum visible timeline entries (default: 50)." })),
     verbose: Type.Optional(Type.Boolean({ description: "If true, show all messages including internal context-tool traffic. If false (default), collapse to structural milestones." })),
 });
 
-const ContextCompactDescription = "Create a summarized continuation branch from an earlier checkpoint or history node. The selected target is the branch point; the summary must restore the useful state from the compacted path after that target. This changes conversation history only; it does not modify or roll back disk files or external systems.";
+const ContextCompactDescription = "Create a summarized continuation branch from an earlier checkpoint or history node. The selected target is the branch point; the summary must restore the useful state from the compacted path after that target. Only the path between target and tip is replaced, so a target near the head reclaims almost nothing: the tool reports the fold size, and refuses a shallow target while context is tight. This changes conversation history only; it does not modify or roll back disk files or external systems.";
 const ContextCompactParams = Type.Object({
-    target: Type.String({ description: "Checkpoint name, history node ID, or root to use as the branch point for the summarized continuation." }),
-    summary: Type.String({ description: "Handoff summary injected into the new continuation branch. Restore current task/state, decisions/constraints, important external side effects (changed files, processes, browser/tickets/remote state), validation status, source anchors/evidence/open questions likely needed soon, and explicit next step. Do not rely on backupCheckpoint for details needed in the next phase." }),
+    target: Type.String({ description: "Checkpoint name, history node ID, or root to use as the branch point for the summarized continuation. 'previous-summary' selects the newest summary already on the active path, which is usually the target that actually frees window." }),
+    summary: Type.String({ description: "Handoff summary injected into the new continuation branch. It replaces ONLY the folded region, so cover what is being discarded -- task/state at the moment of the call, decisions and constraints, external side effects (changed files, processes, browser/tickets/remote state), validation status, source anchors, and an explicit next step. Do not restate anything that already sits above the target: the retained prefix is still in context, and duplicated text is pure cost. Do not rely on backupCheckpoint for details needed in the next phase." }),
     backupCheckpoint: Type.Optional(Type.String({ description: "Optional checkpoint name to label the current conversation state before branching. This is only a recovery pointer; the summary must still contain the state needed to continue." })),
+    force: Type.Optional(Type.Boolean({ description: "Proceed even when the target folds too little to help. Use only for a compaction whose purpose is a fresh summary rather than reclaimed window." })),
 });
 
 const ContextCheckpointDescription = "Create a named anchor by labeling a conversation history node. This does not branch, summarize, or affect external state; it only makes the point easy to find later in timeline or compact target selection.";
@@ -176,6 +237,9 @@ interface PendingCompactRequest extends Static<typeof ContextCompactParams> {
     tid: string;
     enrichedMessage: string;
     usageBeforeText: string;
+    usageBefore?: ContextUsage;
+    fold?: FoldSize;
+    net?: number;
     requestLeaf: string;
     toolCallId: string;
     codemodeToolCallId?: string;
@@ -315,11 +379,20 @@ export default function (pi: ExtensionAPI) {
             }
 
             pi.setLabel(id, params.name);
+            // A checkpoint is an anchor for finding a place later, never a compaction
+            // target: it sits at the current position by construction, and compacting
+            // from the current position folds nothing. Say the cost while it is cheap.
+            const usage = ctx.getContextUsage();
+            const fill = usage?.percent;
+            const report = [`Created checkpoint '${params.name}' at ${id}.`,
+                `Context fill now: ${formatContextUsage(usage, true)}.`];
+            if (fill != null && fill >= GUARD_PRESSURE_PERCENT) {
+                const alt = betterTarget(sm);
+                report.push(`Warning: this anchor sits at ${fill.toFixed(1)}% fill. A checkpoint is not a compaction target -- compacting from here would fold almost nothing.` +
+                    (alt ? ` To reclaim window, target ${alt.id} (${alt.kind}) instead.` : ""));
+            }
             return {
-                content: [{
-                    type: "text",
-                    text: `Created checkpoint '${params.name}' at ${id}.`
-                }],
+                content: [{ type: "text", text: report.join(" ") }],
                 details: {}
             };
         },
@@ -458,6 +531,8 @@ export default function (pi: ExtensionAPI) {
                 allowedIds.forEach(id => visibleSequenceIds.add(id));
             }
 
+            const branchIndexOf = new Map(branch.map((entry, index) => [entry.id, index]));
+            const reclaim = reclaimByIndex(branch);
             const lines: string[] = [];
             let hiddenEntries: SessionEntry[] = [];
             const flushHidden = () => {
@@ -513,7 +588,13 @@ export default function (pi: ExtensionAPI) {
 
                 const marker = isHead ? "*" : (role === "USER" ? "•" : "|");
 
-                lines.push(`${marker} ${id}${meta ? ` (${meta})` : ""} [${role}] ${body}`);
+                // Target candidates carry their price: compacting here frees this much.
+                const isCandidate = entry.type === "branch_summary" || entry.type === "compaction" || !!label;
+                const price = isCandidate
+                    ? ` · reclaim ~${formatTokens(reclaim[branchIndexOf.get(id) ?? 0] ?? 0)}`
+                    : "";
+
+                lines.push(`${marker} ${id}${meta ? ` (${meta})` : ""} [${role}]${price} ${body}`);
             });
 
             flushHidden();
@@ -546,7 +627,10 @@ export default function (pi: ExtensionAPI) {
                 CompactParams.invalidated = true;
                 throw new Error("context_compact: only one compact request is allowed per codemode script.");
             }
-            const tid = resolveTargetId(sm, params.target);
+            const requested = PreviousTargetAliases.has(params.target.trim().toLowerCase())
+                ? (betterTarget(sm)?.id ?? "root")
+                : params.target;
+            const tid = resolveTargetId(sm, requested);
             if (request.codemodeToolCallId) {
                 const branch = sm.getBranch();
                 const targetIndex = branch.findIndex((entry) => entry.id === tid);
@@ -559,6 +643,27 @@ export default function (pi: ExtensionAPI) {
             const currentLeaf = sm.getLeafId();
             if (currentLeaf === tid) {
                 return { content: [{ type: "text", text: `Already at target ${tid}` }], details: {} };
+            }
+
+            const fold = measureFold(sm, tid);
+            const usage = ctx.getContextUsage();
+            const fill = usage?.percent;
+            const added = summaryTokens(params.summary);
+            const net = fold ? fold.tokens - added : undefined;
+            const marginal = net != null && net < GUARD_MIN_NET_TOKENS;
+            if (marginal && !params.force) {
+                const detail = `the target folds ${fold!.nodes} node(s) / ~${formatTokens(fold!.tokens)} tokens while the summary adds ~${formatTokens(added)}, so it nets ${net >= 0 ? "+" : ""}~${formatTokens(net)} of window`;
+                if (fill != null && fill >= GUARD_PRESSURE_PERCENT) {
+                    const alt = betterTarget(sm);
+                    const altFold = alt ? measureFold(sm, alt.id) : undefined;
+                    throw new Error(
+                        `context_compact: refusing this target at ${formatContextUsage(usage, true)} fill -- ${detail}. ` +
+                        `A compaction replaces only the path between target and tip, so a target near the head costs more than it frees. ` +
+                        (alt && altFold ? `Better target: ${alt.id} (${alt.kind}), which folds ${altFold.nodes} node(s) / ~${formatTokens(altFold.tokens)} tokens. ` : "") +
+                        `Or shrink the summary to the folded region: it never needs to restate what already sits above the target. ` +
+                        `Pass force: true only if you want a fresh summary rather than reclaimed window.`,
+                    );
+                }
             }
             if (params.backupCheckpoint && currentLeaf) {
                 pi.setLabel(currentLeaf, params.backupCheckpoint);
@@ -573,12 +678,26 @@ export default function (pi: ExtensionAPI) {
             // within the script does not split the output or rerun operations.
             CompactParams = {
                 ...params, tid, enrichedMessage, usageBeforeText,
+                usageBefore: usage, fold, net,
                 requestLeaf: request.requestLeaf,
                 toolCallId: _id,
                 codemodeToolCallId: request.codemodeToolCallId,
             };
 
-            return { content: [{ type: "text", text: "compact start" }], details: {} };
+            const notes = ["compact start"];
+            if (fold) {
+                notes.push(`folds ${fold.nodes} node(s) / ~${formatTokens(fold.tokens)} tokens`);
+                notes.push(`summary ~${formatTokens(added)} tokens`);
+                notes.push(`net ~${net! >= 0 ? "+" : "-"}${formatTokens(Math.abs(net!))} of window`);
+            }
+            if (marginal) {
+                const alt = betterTarget(sm);
+                const altFold = alt ? measureFold(sm, alt.id) : undefined;
+                notes.push(`WARNING: this target barely helps` +
+                    (alt && altFold ? `; ${alt.id} (${alt.kind}) folds ~${formatTokens(altFold.tokens)}` : "") +
+                    `; and the summary only needs to cover the folded region, not restate the retained prefix`);
+            }
+            return { content: [{ type: "text", text: notes.join(" · ") }], details: {} };
         },
     });
 
@@ -708,6 +827,14 @@ export default function (pi: ExtensionAPI) {
                 }
 
                 const usageAfter = commandCtx.getContextUsage();
+                const beforeTokens = compactParams.usageBefore?.tokens;
+                const afterTokens = usageAfter?.tokens;
+                const reclaimed = beforeTokens != null && afterTokens != null ? beforeTokens - afterTokens : undefined;
+                const reclaimNote = reclaimed == null
+                    ? "context_compact complete; reclamation unmeasured (usage unavailable)."
+                    : reclaimed > 0
+                        ? `context_compact complete: reclaimed ~${formatTokens(reclaimed)} tokens (${compactParams.usageBeforeText} -> ${formatContextUsage(usageAfter, true)}).`
+                        : `context_compact complete but RECLAIMED NOTHING: fill went ${reclaimed === 0 ? "unchanged" : "UP"} by ~${formatTokens(Math.abs(reclaimed))} tokens (${compactParams.usageBeforeText} -> ${formatContextUsage(usageAfter, true)}). The target sat too close to the head; compact from the previous summary on the path to actually free window.`;
                 commandCtx.ui.notify([
                     `Compacted to ${compactParams.target}${compactParams.target === compactParams.tid ? "" : `(${compactParams.tid})`}`,
                     `Context Usage: ${compactParams.usageBeforeText} -> ${formatContextUsage(usageAfter)}`,
@@ -718,8 +845,8 @@ export default function (pi: ExtensionAPI) {
                 pi.sendMessage({
                     customType: PiContextCustomMessageType,
                     content: compactParams.codemodeToolCallId
-                        ? "context_compact complete. Your previous history was summarized. Read the retained codemode output and the handoff summary. The script already completed; do not repeat its operations or a Next Step it has already satisfied. Continue with the remaining work."
-                        : "context_compact complete. Above is the handoff summary of your previous path. Read it, take it as your current state, and continue with the next step it names. Files, processes, and external services are unchanged.",
+                        ? `${reclaimNote} Your previous history was summarized. Read the retained codemode output and the handoff summary. The script already completed; do not repeat its operations or a Next Step it has already satisfied. Continue with the remaining work.`
+                        : `${reclaimNote} Above is the handoff summary of your previous path. Read it, take it as your current state, and continue with the next step it names. Files, processes, and external services are unchanged.`,
                     display: false,
                 }, {
                     triggerTurn: true,

@@ -34,14 +34,19 @@ export function parseCheckpointPhase(name: string): { scope: string; phase: Chec
 export function estimateHistoryTokens(entry: SessionEntry): number {
     if (entry.type === "branch_summary" || entry.type === "compaction") return Math.ceil(entry.summary.length / 4);
     if (entry.type === "custom_message") {
-        if (entry.customType.startsWith("pi-context") && entry.customType !== RetainedCodemodeOutputType) return 0;
+        // A custom message may legitimately arrive without a type (extension traffic
+        // recorded before the field existed). Estimating must never throw: the timeline
+        // and the compaction guard both price whole paths, and one odd entry would
+        // otherwise abort the arithmetic.
+        if (typeof entry.customType === "string" && entry.customType.startsWith("pi-context") &&
+            entry.customType !== RetainedCodemodeOutputType) return 0;
         return estimateTokens({ role: "custom", customType: entry.customType, content: entry.content, display: false, timestamp: 0 });
     }
     if (entry.type !== "message") return 0;
     const message = entry.message;
     if (message.role === "toolResult" && isContextTool(message.toolName)) return 0;
-    if (message.role === "custom" && message.customType.startsWith("pi-context") &&
-        message.customType !== RetainedCodemodeOutputType) return 0;
+    if (message.role === "custom" && typeof message.customType === "string" &&
+        message.customType.startsWith("pi-context") && message.customType !== RetainedCodemodeOutputType) return 0;
     if (message.role === "bashExecution" && message.excludeFromContext) return 0;
     if (message.role === "assistant") {
         return estimateTokens({ ...message, content: message.content.filter(block =>

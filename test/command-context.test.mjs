@@ -98,7 +98,7 @@ function createHarness({ dispatch = "immediate", idle = async () => {}, callName
 for (const dispatch of ["immediate", "async"]) {
     test(`automatically acquires command ctx with ${dispatch} dispatch and reuses it`, async () => {
         const h = createHarness({ dispatch });
-        assert.equal((await h.compact()).content[0].text, "compact start");
+        assert.match((await h.compact()).content[0].text, /^compact start/);  // contract changed: the fold report rides on the same line
         await h.compact();
         assert.deepEqual(h.sent, [{
             content: "/acm",
@@ -148,7 +148,7 @@ test("missing command callback times out without scheduling compaction and permi
     await h.emit("turn_end");
     assert.deepEqual(h.operations, []);
     await h.manual();
-    assert.equal((await h.compact()).content[0].text, "compact start");
+    assert.match((await h.compact()).content[0].text, /^compact start/);  // contract changed: the fold report rides on the same line
 });
 
 test("session shutdown rejects pending acquisition and a new instance acquires its own ctx", async () => {
@@ -225,7 +225,7 @@ function codemodeResult(overrides = {}) {
 
 test("compacts from a codemode parent and waits for its successful result", async () => {
     const h = createHarness({ callName: "codemode", executeId: "call/1" });
-    assert.equal((await h.compact()).content[0].text, "compact start");
+    assert.match((await h.compact()).content[0].text, /^compact start/);  // contract changed: the fold report rides on the same line
     h.append(codemodeResult());
     h.append({ id: "nested-abort-boundary", type: "message", message: {
         role: "assistant", stopReason: "aborted", content: [],

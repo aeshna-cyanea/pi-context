@@ -71,6 +71,25 @@ function createHarness({ order = "t1;compact;t2", navigation = "ok", direct = fa
         sessionManager: sm,
         isStreaming: false,
         agent: { state: { messages: sm.buildSessionContext().messages } },
+        // Pi >= 1.1 calls this from navigateTree (agent-session.js:571) to re-project
+        // model state after any tree move. Ported verbatim from the real method: a
+        // no-op here would make the "public navigateTree rebuilt model state"
+        // assertion pass without the projection having happened.
+        _entryIdsByMessage: new Map(),
+        // Pi's real version (agent-session.js:571) clears the pending tool set, then
+        // returns early when the transcript has no system message -- which this fixture
+        // never appends. So the clear IS the faithful behaviour here, not a shortcut.
+        _pendingToolNames: new Set(),
+        _restoreToolsFromTranscript() {
+            this._pendingToolNames.clear();
+        },
+        _refreshFinalizedContext() {
+            const projection = sm.buildSessionProjection();
+            for (const entry of projection.entries) {
+                for (const message of entry.messages) this._entryIdsByMessage.set(message, entry.sourceEntry.id);
+            }
+            this.agent.state.messages = projection.messages;
+        },
         _extensionRunner: {
             hasHandlers: (name) => name === "session_before_tree" && navigation !== "ok",
             emit: async (event) => {
@@ -173,7 +192,7 @@ for (const order of ["compact;t1;t2", "t1;compact;t2"]) {
     test(`${order}: retain full raw text/images before summary on the real SDK branch`, { timeout: 5000 }, async () => {
         const h = createHarness({ order });
         const requestSnapshot = structuredClone(h.sm.getEntry(h.requestId));
-        assert.equal((await h.compact()).content[0].text, "compact start");
+        assert.match((await h.compact()).content[0].text, /^compact start/);  // contract changed: the fold report rides on the same line
         const resultId = h.appendResult();
         const resultSnapshot = structuredClone(h.sm.getEntry(resultId));
         const originalLeaf = h.sm.getLeafId();
