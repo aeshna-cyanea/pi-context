@@ -1,6 +1,10 @@
 ---
 name: context-management
 description: "Use this skill for multi-turn, phased, or noisy work: research/reading, debugging, plan-then-execute, retries/pivots, background or asynchronous work, handoffs, autumn's decisions, task switching, repeated items, or repeated progress checks. It keeps the conversation as a clean working set with checkpoints, timeline review, and compaction at continuation boundaries. Always use when resuming after context compaction or when a long phase reaches a decision, handoff, validation, or task-switch boundary. Usually skip simple one-shot tasks."
+# hidden from model-selection 2026-11-13 by pan, at autumn's call (Key 64 skill price census: 6 opens in 135
+# trees, none since 2026-10-08, while the tools it documents get used constantly - context_compact 537 calls,
+# context_timeline 160). The fork is ours, mostly mine; still reachable at this path and by /skill:context-management.
+disable-model-invocation: true
 ---
 
 # Context Management
